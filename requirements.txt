@@ -6,3 +6,4 @@ polars
 pydantic
 pydantic-settings
 requests
+python-dotenv

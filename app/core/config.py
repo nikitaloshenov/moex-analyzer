@@ -155,26 +155,10 @@ class PortfolioConfig(BaseModel):
 
 
 class LimitsConfig(BaseModel):
-    """Лимиты API / нагрузки (заготовка под MOEX и кэш)."""
+    """Лимиты API и нагрузки."""
 
     moex_max_concurrent_requests: int = Field(default=10, ge=1, le=50)
-    request_timeout_seconds: float = Field(default=30.0, ge=5.0)
-    enable_response_cache: bool = Field(default=True, description="Кэш ответов до появления PostgreSQL")
-
-
-class CacheConfig(BaseModel):
-    """Кэш и БД (этап позже: SQLite → PostgreSQL)."""
-
-    database_url: str = Field(
-        default="sqlite+aiosqlite:///moex_database.db",
-        description="DSN для кэша котировок (позже можно заменить на PostgreSQL)",
-    )
-    postgres_url: str | None = Field(default=None, description="Запасной DSN PostgreSQL, если включите миграцию")
-
-
-# -----------------------------------------------------------------------------
-# Корневые настройки приложения
-# -----------------------------------------------------------------------------
+    request_timeout_seconds: float = Field(default=30.0, ge=5.0)    
 
 
 class Settings(BaseSettings):
@@ -192,7 +176,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    PROJECT_NAME: str = "MOEX Analyzer"
+    project_name: str = "MOEX Analyzer"
 
     pattern_signals: PatternSignalsConfig = Field(default_factory=PatternSignalsConfig)
     ingestion: IngestionConfig = Field(default_factory=IngestionConfig)
@@ -204,7 +188,6 @@ class Settings(BaseSettings):
     regime: RegimeConfig = Field(default_factory=RegimeConfig)
     portfolio: PortfolioConfig = Field(default_factory=PortfolioConfig)
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
-    cache: CacheConfig = Field(default_factory=CacheConfig)
 
     @field_validator(
         "pattern_signals",
@@ -216,8 +199,7 @@ class Settings(BaseSettings):
         "backtest_metrics",
         "regime",
         "portfolio",
-        "limits",
-        "cache",
+        "limits",  
         mode="before",
     )
     @classmethod
@@ -235,8 +217,7 @@ class Settings(BaseSettings):
             "backtest_metrics": BacktestMetricsConfig,
             "regime": RegimeConfig,
             "portfolio": PortfolioConfig,
-            "limits": LimitsConfig,
-            "cache": CacheConfig,
+            "limits": LimitsConfig,            
         }.get(info.field_name)
         return model(**v) if model else v
 
