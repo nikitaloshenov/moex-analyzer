@@ -4,7 +4,8 @@
 Роль: булевы признаки по последней (или заданной) свече DataFrame.
 Используется только из PatternAnalyzer (вход — pandas после конвертации из Polars).
 """
-
+from __future__ import annotations
+import polars as pl
 import pandas as pd
 
 
@@ -95,3 +96,64 @@ class CandlePatterns:
         avg_vol = df["volume"].iloc[idx - 20 : idx].mean()
 
         return curr_vol > (avg_vol * multiplier)
+
+# Твой класс CandlePatterns остается здесь без изменений
+class CandlePatterns:
+    # ... (весь твой код с is_pin_bar, is_engulfing и т.д. оставляем как есть)
+    pass
+
+
+class PolarsSignalGenerator:
+    """
+    Высокопроизводительный генератор сигналов (Модуль М2).
+    Работает на векторизованных операциях Polars без циклов и конвертаций.
+    """
+    
+    @staticmethod
+    def generate_signals(df_30m: pl.DataFrame) -> pl.DataFrame:
+        """
+        Вход: df_30m с колонками begin, open, high, low, close, volume.
+        Выход: df_30m с добавленной колонкой 'signal' (-1, 1 или None).
+        """
+        # Гарантируем сортировку по времени
+        df = df_30m.sort("begin")
+        
+        # 1. Считаем параметры свечей через сдвиги (shift), чтобы имитировать логику паттернов
+        df = df.with_columns([
+            (pl.col("close") - pl.col("open")).abs().alias("body"),
+            (pl.col("high") - pl.col("low")).alias("full_range"),
+            # Средний объем за последние 20 баров (окно для Volume Spike)
+            pl.col("volume").rolling_mean(window_size=20).shift(1).alias("avg_volume_20")
+        ])
+        
+        # 2. Описываем условия для паттернов (векторно)
+        # Пример: Упрощенный векторный Volume Spike + Engulfing (Поглощение)
+        prev_close = pl.col("close").shift(1)
+        prev_open = pl.col("open").shift(1)
+        
+        # Условие для Long (Бычье поглощение + повышенный объем)
+        is_bullish_engulfing = (
+            (pl.col("close") > pl.col("open")) & 
+            (prev_close < prev_open) & 
+            (pl.col("close") > prev_open) & 
+            (pl.col("volume") > pl.col("avg_volume_20") * 1.2)
+        )
+        
+        # Условие для Short (Медвежье поглощение + повышенный объем)
+        is_bearish_engulfing = (
+            (pl.col("close") < pl.col("open")) & 
+            (prev_close > prev_open) & 
+            (pl.col("close") < prev_open) & 
+            (pl.col("volume") > pl.col("avg_volume_20") * 1.2)
+        )
+        
+        # 3. Формируем финальную колонку signal строго по ТЗ хакатона [-1, 1, None]
+        df = df.with_columns(
+            pl.when(is_bullish_engulfing).then(1)
+            .when(is_bearish_engulfing).then(-1)
+            .otherwise(None)
+            .alias("signal")
+        )
+        
+        # Чистим временные колонки, чтобы не засорять память
+        return df.drop(["body", "full_range", "avg_volume_20"])
