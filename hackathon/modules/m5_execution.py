@@ -34,7 +34,7 @@ class ExecutionOptimizer:
         imp["bar_end_ts"] = imp["bar_end_ts"].astype("int64")
         bars = bars.merge(imp, on=["bar_end_ts", "seccode"], how="left")
         bars["volume_mkt"] = bars["volume_mkt"].fillna(0).clip(lower=1)
-        bars["a"]          = bars["a"].fillna(0.03)
+        bars["a"]          = bars["a"].fillna(0.01)
         bars["mid"]        = bars["mid"].clip(lower=0.01)
 
         bars = bars.merge(

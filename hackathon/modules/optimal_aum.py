@@ -44,8 +44,8 @@ def compute_optimal_aum(
         .merge(adv, on="seccode", how="left")
         .merge(impact_calibrated[["seccode", "a"]], on="seccode", how="left")
     )
-    merged["adv"]   = merged["adv"].fillna(1e6)
-    merged["a"]     = merged["a"].fillna(0.03)
+    merged["adv"]   = merged["adv"].fillna(1e6).clip(lower=1)
+    merged["a"]     = merged["a"].fillna(0.01)
     merged["alpha"] = merged["alpha"].clip(lower=0)  # only profitable signals
 
     # X* = alpha * ADV / (2a)

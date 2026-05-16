@@ -57,7 +57,7 @@ def run_pipeline(
     loader = DataLoader(folder_1min, folder_5min).load()
     bars_5 = loader.bars_5min()
     bars_1 = loader.bars_1min()
-    adv_df = loader.adv(bars_5)
+    adv_df = loader.adv(bars_1)  # use 1-min bars for ADV — 5-min volume may be zero-filled
 
     print(f"  5-min bars: {len(bars_5):,} rows, {bars_5['seccode'].nunique()} tickers")
     print(f"  1-min bars: {len(bars_1):,} rows")
