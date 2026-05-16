@@ -1,0 +1,47 @@
+version: '3.8'
+
+services:
+  web-app:
+    build: .
+    container_name: quant_app
+    restart: always
+    environment:
+      - VIRTUAL_HOST=jirniydizainer.ru,www.jirniydizainer.ru
+      - LETSENCRYPT_HOST=jirniydizainer.ru,www.jirniydizainer.ru
+      - LETSENCRYPT_EMAIL=nikitalosenov@gmail.com
+      - VIRTUAL_PORT=8501
+    volumes:
+      - ./data:/app/data
+      - ./web:/app/web
+  nginx-proxy:
+    image: nginxproxy/nginx-proxy
+    container_name: nginx-proxy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/tmp/docker.sock:ro
+      - certs:/etc/nginx/certs
+      - vhost:/etc/nginx/vhost.d
+      - html:/usr/share/nginx/html
+    restart: always
+
+  ssl-helper:
+    image: nginxproxy/acme-companion
+    container_name: ssl-helper
+    environment:
+      - NGINX_PROXY_CONTAINER=nginx-proxy
+      - FORCE_IPVERSION=4
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - certs:/etc/nginx/certs
+      - vhost:/etc/nginx/vhost.d
+      - html:/usr/share/nginx/html
+    depends_on:
+      - nginx-proxy
+    restart: always
+
+volumes:
+  certs:
+  vhost:
+  html:
