@@ -1,116 +1,179 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
-
-try:
-    import polars as pl
-except ImportError:  # pragma: no cover
-    pl = None  # type: ignore[misc, assignment]
+import polars as pl
 
 from app.core.config import settings
-from app.services.patterns import CandlePatterns
 
 
 class PatternAnalyzer:
     """
-    Модуль детекции сигналов.
-    По срезу OHLCV (30-минутные бары) вычисляет паттерны, ATR и уровни TP/SL.
+    M2: clean 5-minute signal generator.
+
+    Output contract:
+        signal_5min:
+            bar_end_ts: int64
+            seccode: str
+            value: float64 in [-1, 1] or NaN
     """
+
+    @staticmethod
+    def _ts_int(value) -> int:
+        if hasattr(value, "timestamp"):
+            return int(value.timestamp() * 1_000_000_000)
+        try:
+            return int(value)
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _rsi(close: pd.Series, window: int) -> pd.Series:
+        delta = close.diff()
+        gain = delta.clip(lower=0.0)
+        loss = -delta.clip(upper=0.0)
+        avg_gain = gain.ewm(alpha=1.0 / window, adjust=False, min_periods=window).mean()
+        avg_loss = loss.ewm(alpha=1.0 / window, adjust=False, min_periods=window).mean()
+        rs = avg_gain / avg_loss.replace(0.0, np.nan)
+        return 100.0 - (100.0 / (1.0 + rs))
+
+    @staticmethod
+    def build_signal_5min(bars_5m: pl.DataFrame, ticker: str = "DEFAULT") -> pl.DataFrame:
+        if bars_5m is None or bars_5m.is_empty():
+            return pl.DataFrame(
+                schema={
+                    "bar_end_ts": pl.Int64,
+                    "seccode": pl.Utf8,
+                    "value": pl.Float64,
+                }
+            )
+
+        ps = settings.pattern_signals
+        df = bars_5m.sort("begin").to_pandas()
+        atr_window = int(getattr(ps, "atr_window", 20))
+
+        close = pd.to_numeric(df["close"], errors="coerce")
+        high = pd.to_numeric(df["high"], errors="coerce")
+        low = pd.to_numeric(df["low"], errors="coerce")
+        volume = pd.to_numeric(df.get("volume", pd.Series(0.0, index=df.index)), errors="coerce").fillna(0.0)
+
+        ema_fast = close.ewm(span=10, adjust=False, min_periods=10).mean()
+        ema_slow = close.ewm(span=30, adjust=False, min_periods=30).mean()
+        ema_slope = ema_fast - ema_fast.shift(3)
+        rsi = PatternAnalyzer._rsi(close, atr_window)
+
+        prev_close = close.shift(1)
+        true_range = pd.concat(
+            [
+                (high - low).abs(),
+                (high - prev_close).abs(),
+                (low - prev_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+        atr = true_range.ewm(alpha=1.0 / atr_window, adjust=False, min_periods=atr_window).mean()
+        safe_atr = atr.replace(0.0, np.nan)
+
+        prev_high = high.shift(1).rolling(20, min_periods=20).max()
+        prev_low = low.shift(1).rolling(20, min_periods=20).min()
+        avg_vol = volume.shift(1).rolling(20, min_periods=20).mean()
+
+        buy_size = pd.to_numeric(df.get("buy_size", pd.Series(0.0, index=df.index)), errors="coerce").fillna(0.0)
+        sell_size = pd.to_numeric(df.get("sell_size", pd.Series(0.0, index=df.index)), errors="coerce").fillna(0.0)
+        liquidity = (buy_size + sell_size).replace(0.0, np.nan)
+        imbalance = (buy_size - sell_size) / liquidity
+
+        value = pd.Series(np.nan, index=df.index, dtype="float64")
+
+        trend_up = (ema_fast > ema_slow) & (ema_slope > 0)
+        trend_down = (ema_fast < ema_slow) & (ema_slope < 0)
+
+        ema_distance_atr = (close - ema_fast).abs() / safe_atr
+        volume_confirmed = (volume > avg_vol * 1.05) & (volume < avg_vol * 3.0)
+        volatility_stable = true_range < safe_atr * 2.0
+        not_overextended = ema_distance_atr < 2.5
+
+        breakout_long = (
+            (close > prev_high)
+            & volume_confirmed
+            & volatility_stable
+            & not_overextended
+            & (imbalance.fillna(0.0) >= 0.0)
+        )
+        breakout_short = (
+            (close < prev_low)
+            & volume_confirmed
+            & volatility_stable
+            & not_overextended
+            & (imbalance.fillna(0.0) <= 0.0)
+        )
+
+        # Simple defensible alpha:
+        # trend-following breakout + quality filters to avoid chasing spikes.
+        value.loc[trend_up & breakout_long & (rsi < 68)] = 1.0
+        value.loc[trend_down & breakout_short & (rsi > 32)] = -1.0
+
+        cooldown_bars = 2
+        last_signal_idx = -10**9
+        for idx, raw_value in enumerate(value.to_numpy()):
+            if not np.isfinite(raw_value):
+                continue
+            if idx - last_signal_idx <= cooldown_bars:
+                value.iat[idx] = np.nan
+                continue
+            last_signal_idx = idx
+
+        out = pl.DataFrame(
+            {
+                "bar_end_ts": [PatternAnalyzer._ts_int(x) for x in df["begin"]],
+                "seccode": [ticker] * len(df),
+                "value": value.tolist(),
+            }
+        )
+        return out
 
     @staticmethod
     def analyze_all(
         candles,
-        ticker="DEFAULT",
+        ticker: str = "DEFAULT",
         d_sup=None,
         d_res=None,
         ma200_glob=None,
-        trades=None
+        trades=None,
     ) -> dict:
         """
-        Полный разбор последней свечи в переданном слайсе данных.
+        Legacy-compatible single-bar signal output.
+        Internally uses build_signal_5min and returns BUY/SELL/HOLD.
         """
-        # --- Вход Polars → pandas (граница с высокопроизводительным движком) ---
-        if pl is not None and isinstance(candles, pl.DataFrame):
-            candles = candles.to_pandas()
+        if isinstance(candles, pl.DataFrame):
+            bars = candles
+        else:
+            bars = pl.from_pandas(candles)
 
-        ps = settings.pattern_signals
-        atr_w = ps.atr_window
+        signal_df = PatternAnalyzer.build_signal_5min(bars, ticker=ticker)
+        if signal_df.is_empty():
+            return {"ticker": ticker, "signal": "HOLD", "score": 0.0, "price": 0.0}
 
-        # --- Защита: минимум данных для прогрева ATR и скользящих средних ---
-        if candles is None or len(candles) < max(30, atr_w + 1):
-            return {"signal": "HOLD", "score": 0, "price": 0}
+        val = signal_df["value"][-1]
+        price = float(bars["close"][-1]) if "close" in bars.columns and bars.height else 0.0
 
-        conf = {"tp_mult": ps.tp_mult, "sl_mult": ps.sl_mult}
-        current_price = float(candles["close"].iloc[-1])
-
-        # --- ATR: волатильность для динамических уровней TP/SL ---
-        high_low = candles["high"] - candles["low"]
-        tr = pd.concat(
-            [
-                high_low,
-                abs(candles["high"] - candles["close"].shift()),
-                abs(candles["low"] - candles["close"].shift()),
-            ],
-            axis=1,
-        ).max(axis=1)
-        
-        atr_series = tr.rolling(atr_w).mean()
-        atr = float(atr_series.iloc[-1])
-        
-        if pd.isna(atr) or atr <= 0:
-            atr = current_price * 0.001  # Минимальная заглушка, чтобы не сломать TP/SL
-
-        # --- Объёмная валидация (VSA) ---
-        volume_confirmed = CandlePatterns.check_volume(
-            candles, multiplier=ps.volume_confirm_multiplier
-        )
-
-        # --- Сканирование паттернов Price Action ---
-        is_pin = CandlePatterns.is_pin_bar(candles)
-        is_engulfing = CandlePatterns.is_engulfing(candles)
-        is_railroad = CandlePatterns.is_railroad_tracks(candles)
-        any_pattern = is_pin or is_engulfing or is_railroad
-
-        # --- Логика генерации сигналов ---
-        direction_up = candles["close"].iloc[-1] > candles["open"].iloc[-1]
-        res_signal = "HOLD"
-        score = 0
-
-        if volume_confirmed and any_pattern:
-            if direction_up:
-                res_signal = "STRONG BUY" if is_engulfing else "BUY"
-                score = 80 if is_engulfing else 60
-            else:
-                res_signal = "STRONG SELL" if is_engulfing else "SELL"
-                score = -80 if is_engulfing else -60
-
-        # --- Вычисление уровней TP/SL от текущей цены рынка ---
-        stop_loss = None
-        take_profit = None
-        
-        if "BUY" in res_signal:
-            stop_loss = current_price - (atr * conf["sl_mult"])
-            take_profit = current_price + (atr * conf["tp_mult"])
-        elif "SELL" in res_signal:
-            stop_loss = current_price + (atr * conf["sl_mult"])
-            take_profit = current_price - (atr * conf["tp_mult"])
-
-        rr_ratio = None
-        if stop_loss is not None and take_profit is not None:
-            risk = abs(current_price - stop_loss)
-            reward = abs(take_profit - current_price)
-            if risk != 0:
-                rr_ratio = round(reward / risk, 2)
+        if val is None or not np.isfinite(float(val)) or abs(float(val)) < 1e-12:
+            signal = "HOLD"
+            score = 0.0
+        elif float(val) > 0:
+            signal = "BUY"
+            score = 60.0
+        else:
+            signal = "SELL"
+            score = -60.0
 
         return {
-            "ticker": str(ticker),
-            "score": float(score),
-            "signal": str(res_signal),
-            "price": float(current_price),
-            "stop_loss": float(round(stop_loss, 2)) if stop_loss is not None else None,
-            "take_profit": float(round(take_profit, 2)) if take_profit is not None else None,
-            "pattern_found": bool(any_pattern),
-            "volume_ok": bool(volume_confirmed),
-            "atr": float(round(atr, 2)),
-            "rr_ratio": float(rr_ratio) if rr_ratio is not None else None,
+            "ticker": ticker,
+            "signal": signal,
+            "score": score,
+            "price": price,
+            "pattern_found": False,
+            "volume_ok": True,
+            "atr": 0.0,
+            "rr_ratio": None,
         }

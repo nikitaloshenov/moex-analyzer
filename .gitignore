@@ -2,6 +2,9 @@
 venv/
 .venv/
 
+./hackathon/data/
+insample_data/
+
 # Python cache
 __pycache__/
 *.py[cod]

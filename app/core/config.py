@@ -66,6 +66,10 @@ class ExecutionConfig(BaseModel):
         ge=1.0, 
         description="Размер крупного ордера Q (в лотах) для симуляции TWAP"
     )
+    dynamic_order_sizing: bool = Field(default=False)
+    target_participation_rate: float = Field(default=0.01, ge=0.0, le=1.0)
+    max_order_notional_rub: float | None = Field(default=None, ge=0.0)
+    min_order_size_lots: float = Field(default=1.0, ge=0.0)
     twap_slices: int = Field(default=30, ge=2, le=500, description="Число частей TWAP (под 30-минутные бары)")
     twap_interval_seconds: int = Field(default=60, ge=1, description="Интервал между частями TWAP (1 минута)")
     vwap_volume_lookback_bars: int = Field(default=20, ge=5)
