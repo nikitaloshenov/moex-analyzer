@@ -1,13 +1,12 @@
 """
 Optimal AUM Estimation
 ======================
-For each ticker s:
+По ТЗ: f(X) = alpha_s * X - (a_s / ADV_s) * X^2
 
-    f(X) = alpha_s * X - (a_s / ADV_s) * X^2
+X*_s = alpha_s * ADV_s / (2 * a_s)
 
-    X*_s = alpha_s * ADV_s / (2 * a_s)
-
-Portfolio X* = Σ_s X*_s (with position-sign constraints from signal)
+ADV считается в рублях (лоты × mid-цена), чтобы X* был в рублях.
+alpha — средний pnl_mid per bar при pos ≠ 0, из M3.
 """
 
 import numpy as np
@@ -15,22 +14,17 @@ import pandas as pd
 
 
 def compute_optimal_aum(
-    backtest_baseline: pd.DataFrame,
-    adv:              pd.DataFrame,
-    impact_calibrated: pd.DataFrame,
+    backtest_baseline:  pd.DataFrame,   # [seccode, pnl_mid, pos]
+    adv:                pd.DataFrame,   # [seccode, adv]  — в лотах
+    impact_calibrated:  pd.DataFrame,   # [seccode, a]
+    bars_1min:          pd.DataFrame = None,  # для перевода ADV в рубли
 ) -> pd.DataFrame:
     """
-    Parameters
-    ----------
-    backtest_baseline  : DataFrame[seccode, pnl_mid, pos]
-    adv                : DataFrame[seccode, adv]
-    impact_calibrated  : DataFrame[seccode, a]
-
     Returns
     -------
-    DataFrame[seccode, alpha, adv, a, X_star, net_pnl_curve_peak]
+    DataFrame[seccode, alpha, adv_rub, a, X_star, net_pnl_peak]
     """
-    # Estimate alpha = mean pnl_mid per bar (when position ≠ 0)
+    # alpha = средний pnl_mid per bar при ненулевой позиции
     alpha_df = (
         backtest_baseline[backtest_baseline["pos"] != 0]
         .groupby("seccode")["pnl_mid"]
@@ -44,17 +38,41 @@ def compute_optimal_aum(
         .merge(adv, on="seccode", how="left")
         .merge(impact_calibrated[["seccode", "a"]], on="seccode", how="left")
     )
-    merged["adv"]   = merged["adv"].fillna(1e6).clip(lower=1)
-    merged["a"]     = merged["a"].fillna(0.01)
-    merged["alpha"] = merged["alpha"].clip(lower=0)  # only profitable signals
+    merged["adv"] = merged["adv"].fillna(0)
+    merged["a"]   = merged["a"].fillna(0.01)
 
-    # X* = alpha * ADV / (2a)
-    merged["X_star"] = merged["alpha"] * merged["adv"] / (2 * merged["a"])
+    # ADV в рублях: если bars_1min передан — считаем mid-цену per ticker
+    if bars_1min is not None:
+        mid_price = (
+            bars_1min.groupby("seccode")["mid"]
+            .median()
+            .reset_index()
+            .rename(columns={"mid": "price"})
+        )
+        merged = merged.merge(mid_price, on="seccode", how="left")
+        merged["price"]   = merged["price"].fillna(1.0).clip(lower=0.01)
+        merged["adv_rub"] = merged["adv"] * merged["price"]
+    else:
+        merged["adv_rub"] = merged["adv"]
 
-    # Peak net PnL at X*: f(X*) = alpha * X* - (a/ADV) * X*^2
-    c = merged["a"] / merged["adv"]
-    merged["net_pnl_peak"] = merged["alpha"] * merged["X_star"] - c * merged["X_star"]**2
+    merged["adv_rub"] = merged["adv_rub"].clip(lower=1.0)
 
-    return merged[["seccode", "alpha", "adv", "a", "X_star", "net_pnl_peak"]].sort_values(
-        "X_star", ascending=False
-    ).reset_index(drop=True)
+    # Только тикеры с положительным alpha (прибыльный сигнал)
+    merged["alpha"] = merged["alpha"].clip(lower=0)
+
+    # X* = alpha * ADV_rub / (2 * a)  [в рублях]
+    merged["X_star"] = merged["alpha"] * merged["adv_rub"] / (2 * merged["a"])
+
+    # f(X*) = alpha * X* - (a / ADV_rub) * X*^2
+    c = merged["a"] / merged["adv_rub"]
+    merged["net_pnl_peak"] = (
+        merged["alpha"] * merged["X_star"]
+        - c * merged["X_star"] ** 2
+    )
+
+    return (
+        merged[["seccode", "alpha", "adv_rub", "a", "X_star", "net_pnl_peak"]]
+        .rename(columns={"adv_rub": "adv"})
+        .sort_values("X_star", ascending=False)
+        .reset_index(drop=True)
+    )

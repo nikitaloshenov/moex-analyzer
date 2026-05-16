@@ -103,7 +103,7 @@ def run_pipeline(
     print(f"M5: Execution optimization (method={method})")
     print("="*60)
     exec_opt = ExecutionOptimizer(aum=aum, method=method)
-    schedule, exec_summary = exec_opt.run(signal, bars_1, impact_table)
+    schedule, exec_summary = exec_opt.run(signal, bars_1, impact_table, backtest)
 
     if not exec_summary.empty:
         is_comparison = exec_opt.compare_is(exec_summary)
@@ -122,7 +122,7 @@ def run_pipeline(
     print("\n" + "="*60)
     print("Optimal AUM estimation")
     print("="*60)
-    opt_aum = compute_optimal_aum(backtest, adv_df, a_summary)
+    opt_aum = compute_optimal_aum(backtest, adv_df, a_summary, bars_1)
     total_x_star = opt_aum["X_star"].sum()
     print(f"  Total X* (portfolio): {total_x_star:,.0f} RUB")
     print(f"  Top 5 tickers by X*:")
