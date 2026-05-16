@@ -2,6 +2,8 @@
 venv/
 .venv/
 
+./hackathon/data/
+
 # Python cache
 __pycache__/
 *.py[cod]
